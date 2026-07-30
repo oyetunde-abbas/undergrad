@@ -156,7 +156,25 @@ def get_jobs(
     conn.close()
 
     return [dict(row) for row in rows]
-    
+def get_job(job_id):
+
+    conn = get_conn()
+
+    row = conn.execute(
+        """
+        SELECT *
+        FROM listings
+        WHERE id = ?
+        """,
+        (job_id,)
+    ).fetchone()
+
+    conn.close()
+
+    if row:
+        return dict(row)
+
+    return None    
 if __name__ == "__main__":
 
     listings = get_all_listings()

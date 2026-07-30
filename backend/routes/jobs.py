@@ -1,12 +1,13 @@
 from typing import Optional
 
-from fastapi import APIRouter, Query
-from db import get_jobs
+from fastapi import APIRouter, HTTPException, Query
+
+from db import get_job, get_jobs
 
 router = APIRouter()
 
 
-@router.get("/jobs")
+@router.get("")
 def read_jobs(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=50),
@@ -29,3 +30,17 @@ def read_jobs(
         source=source,
         location=location,
     )
+
+
+@router.get("/{job_id}")
+def read_job(job_id: int):
+
+    job = get_job(job_id)
+
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
+    return job
