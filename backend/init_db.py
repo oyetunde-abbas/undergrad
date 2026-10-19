@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS site_hashes (
 )
 """)
 
+from migrate_add_expiry import migrate
+migrate(conn)
+
 conn.commit()
 conn.close()
 

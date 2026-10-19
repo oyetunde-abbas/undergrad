@@ -33,6 +33,8 @@ def hash_password(password):
 
 
 def verify_password(password, password_hash):
+    if not password_hash:
+        return False  # Google-only accounts have no password to check against
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
     except (ValueError, TypeError):

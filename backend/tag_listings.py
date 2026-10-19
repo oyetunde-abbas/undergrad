@@ -12,7 +12,7 @@ This module replaces the defaults with a real (if imperfect) keyword-based
 classifier run against each listing's title + summary. It's not an LLM and
 won't catch everything, but it's grounded in the actual text of each posting
 instead of being a static placeholder. Phase 3 of the original build plan
-(Ollama-based tagging) is still the natural upgrade path for the cases this
+(Gemini-based tagging) is still the natural upgrade path for the cases this
 keyword approach gets wrong.
 """
 

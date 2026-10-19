@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { trackEvent } from './tracking.js'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const PAGE_LIMIT = 20
@@ -17,15 +18,204 @@ function initials(name) {
   return name.trim().charAt(0).toUpperCase()
 }
 
-// Placeholder "match score" until a real recommendation model exists.
-function fakeMatchScore(job) {
-  const base = 78
-  const bonus = (job.id % 19)
-  return Math.min(97, base + bonus)
+// No made-up percentages: the For-you feed returns plain-language reasons
+// ("Fits your field", "Corps members welcome") computed from the student's real answers.
+function matchReasons(job) {
+  return Array.isArray(job.match_reasons) ? job.match_reasons : []
+}
+
+const ONB_STAGES = [['final_year', 'Final-year student'], ['pre_nysc', 'Heading to NYSC'], ['serving', 'Serving corps member'], ['graduate', 'Recent graduate']]
+const ONB_FIELDS = [['tech_design', 'Tech & design'], ['finance', 'Finance & accounting'], ['engineering', 'Engineering'], ['business', 'Business & marketing'], ['health_sciences', 'Health & sciences'], ['legal_humanities', 'Law & humanities']]
+const ONB_DEGREES = [['first', 'First Class'], ['2:1', '2:1'], ['2:2', '2:2'], ['hnd', 'HND'], ['ond', 'OND']]
+const ONB_LOCATIONS = [['lagos', 'Lagos'], ['abuja', 'Abuja'], ['remote', 'Remote'], ['anywhere', 'Anywhere']]
+const ONB_TRACKS = [['graduate_trainee', 'Graduate trainee'], ['product_tech', 'Product / tech'], ['data', 'Data'], ['audit_finance', 'Audit & finance'], ['sales_ops', 'Sales / ops'], ['customer_experience', 'Customer experience']]
+const NYSC_FILTERS = [['accepted', 'Corps members welcome'], ['post', 'Post-NYSC only'], ['siwes', 'SIWES / undergrad']]
+const DEGREE_LABELS = { first: 'First Class', '2:1': '2:1', '2:2': '2:2', hnd: 'HND', ond: 'OND' }
+
+function OnboardingPage({ onSave, onSkip }) {
+  const [step, setStep] = useState(0)
+  const [stage, setStage] = useState(null)
+  const [field, setField] = useState(null)
+  const [degree, setDegree] = useState(null) // optional — never defaulted
+  const [locations, setLocations] = useState([])
+  const [tracks, setTracks] = useState([])
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+
+  function toggleLocation(v) {
+    setLocations((prev) => {
+      if (v === 'anywhere') return prev.includes('anywhere') ? [] : ['anywhere']
+      const without = prev.filter((x) => x !== 'anywhere')
+      return without.includes(v) ? without.filter((x) => x !== v) : [...without, v]
+    })
+  }
+  function toggleTrack(v) {
+    setTracks((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : prev.length < 3 ? [...prev, v] : prev))
+  }
+
+  const canNext = step === 0 ? !!stage : step === 1 ? !!field : true
+  const last = step === 3
+
+  function finish() {
+    setSaving(true)
+    setError(null)
+    const payload = { stage, field, locations, tracks }
+    if (degree) payload.degree = degree
+    onSave(payload).catch(() => { setError("Couldn't save that — check your connection and try again."); setSaving(false) })
+  }
+
+  const Chip = ({ active, onClick, children }) => (
+    <button type="button" className={`chip ${active ? 'active' : ''}`} onClick={onClick}>{children}</button>
+  )
+
+  return (
+    <div className="app onb-page">
+      <div className="onb-top">
+        <div className="onb-progress">
+          {[0, 1, 2, 3].map((i) => <div key={i} className={`onb-dot ${i <= step ? 'on' : ''}`} />)}
+        </div>
+        <button type="button" className="onb-skip" onClick={onSkip}>Not now</button>
+      </div>
+
+      <div className="onb-body">
+        {step === 0 && (<>
+          <h2>Where are you right now?</h2>
+          <p>Tap one — we use this to show roles you can actually apply for.</p>
+          <div className="filters-chip-grid">{ONB_STAGES.map(([v, l]) => <Chip key={v} active={stage === v} onClick={() => setStage(v)}>{l}</Chip>)}</div>
+        </>)}
+        {step === 1 && (<>
+          <h2>What did you study?</h2>
+          <div className="filters-chip-grid">{ONB_FIELDS.map(([v, l]) => <Chip key={v} active={field === v} onClick={() => setField(v)}>{l}</Chip>)}</div>
+          <h3 className="onb-sub">Degree class <span>(optional)</span></h3>
+          <p>Many graduate schemes filter on this. We only use it to hide roles that need a higher class than yours.</p>
+          <div className="filters-chip-grid">
+            {ONB_DEGREES.map(([v, l]) => <Chip key={v} active={degree === v} onClick={() => setDegree(degree === v ? null : v)}>{l}</Chip>)}
+            <Chip active={degree === null} onClick={() => setDegree(null)}>Prefer not to say</Chip>
+          </div>
+        </>)}
+        {step === 2 && (<>
+          <h2>Where can you work?</h2>
+          <p>Pick any that suit you.</p>
+          <div className="filters-chip-grid">{ONB_LOCATIONS.map(([v, l]) => <Chip key={v} active={locations.includes(v)} onClick={() => toggleLocation(v)}>{l}</Chip>)}</div>
+        </>)}
+        {step === 3 && (<>
+          <h2>What kind of roles?</h2>
+          <p>Pick up to 3.</p>
+          <div className="filters-chip-grid">{ONB_TRACKS.map(([v, l]) => <Chip key={v} active={tracks.includes(v)} onClick={() => toggleTrack(v)}>{l}</Chip>)}</div>
+        </>)}
+        {error && <div className="state-msg error" style={{ padding: '10px 0 0' }}>{error}</div>}
+      </div>
+
+      <div className="onb-footer">
+        {step > 0 && <button type="button" className="onb-back" onClick={() => setStep(step - 1)} disabled={saving}>Back</button>}
+        <button type="button" className="filters-apply-btn onb-next" disabled={!canNext || saving} onClick={() => (last ? finish() : setStep(step + 1))}>
+          {last ? (saving ? 'Saving…' : 'Show my roles') : 'Next'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function daysSince(dateStr) {
+  if (!dateStr) return null
+  const d = new Date(String(dateStr).includes('T') || String(dateStr).includes('Z') ? dateStr : String(dateStr).replace(' ', 'T') + 'Z')
+  if (isNaN(d.getTime())) return null
+  return Math.floor((Date.now() - d.getTime()) / 86400000)
+}
+
+function DraftPanel({ job, apiFetch, userName, alreadyTracked, onMarkApplied }) {
+  const [phase, setPhase] = useState('idle') // idle | loading | ready | error
+  const [draft, setDraft] = useState(null)
+  const [subject, setSubject] = useState('')
+  const [body, setBody] = useState('')
+  const [error, setError] = useState(null)
+  const [launched, setLaunched] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [marked, setMarked] = useState(false)
+
+  function generate() {
+    setPhase('loading')
+    setError(null)
+    apiFetch(`/jobs/${job.id}/draft`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: userName || null }),
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(data.detail || 'Could not prepare a draft')
+        setDraft(data); setSubject(data.subject); setBody(data.body); setPhase('ready')
+      })
+      .catch((e) => { setError(e.message || 'Could not prepare a draft'); setPhase('error') })
+  }
+
+  function copyText() {
+    const text = `${subject}\n\n${body}`
+    const done = () => { setCopied(true); setLaunched(true); setTimeout(() => setCopied(false), 2000) }
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done).catch(() => {})
+    else done()
+  }
+
+  const enc = encodeURIComponent
+  const mailto = draft?.to_email ? `mailto:${draft.to_email}?subject=${enc(subject)}&body=${enc(body)}` : null
+  const gmail = draft?.to_email ? `https://mail.google.com/mail/?view=cm&fs=1&to=${enc(draft.to_email)}&su=${enc(subject)}&body=${enc(body)}` : null
+  const tooLong = mailto && mailto.length > 1900
+
+  return (
+    <div className="draft-panel">
+      {phase === 'idle' || phase === 'loading' || phase === 'error' ? (
+        <>
+          <button type="button" className="sc-edit" style={{ width: '100%', padding: 11, fontSize: 13 }} onClick={generate} disabled={phase === 'loading'}>
+            {phase === 'loading' ? 'Preparing your draft…' : '✉️ Draft my application'}
+          </button>
+          <div className="draft-note">Undergrad never sends anything for you. You review it, attach your own CV, and send it yourself.</div>
+          {error && <div className="state-msg error" style={{ padding: '8px 0 0' }}>{error}</div>}
+        </>
+      ) : (
+        <>
+          <div className="draft-head">
+            {draft.method === 'email' ? `To: ${draft.to_email}` : 'No email address found — use the portal'}
+          </div>
+          <input className="draft-input" value={subject} onChange={(e) => setSubject(e.target.value)} aria-label="Subject" />
+          <textarea className="draft-text" rows={11} value={body} onChange={(e) => setBody(e.target.value)} aria-label="Application text" />
+          {draft.notes?.map((n) => <div key={n} className="draft-note">{n}</div>)}
+          <div className="draft-note">Check every line is true before you send. Edit anything you like.</div>
+          <div className="draft-actions">
+            {mailto && <a className="draft-btn primary" href={mailto} onClick={() => setLaunched(true)}>Open in email app</a>}
+            {gmail && <a className="draft-btn" href={gmail} target="_blank" rel="noopener noreferrer" onClick={() => setLaunched(true)}>Open in Gmail</a>}
+            <button type="button" className="draft-btn" onClick={copyText}>{copied ? 'Copied ✓' : 'Copy text'}</button>
+            {!mailto && job.apply_url && <a className="draft-btn primary" href={job.apply_url} target="_blank" rel="noopener noreferrer" onClick={() => setLaunched(true)}>Go to portal</a>}
+          </div>
+          {tooLong && <div className="draft-note">This draft is long — if your email app cuts it off, use Copy text.</div>}
+          {launched && !alreadyTracked && !marked && (
+            <div className="draft-confirm">
+              Did you send your application?
+              <div className="draft-actions">
+                <button type="button" className="draft-btn primary" onClick={() => { onMarkApplied(); setMarked(true) }}>Yes, add to my tracker</button>
+                <button type="button" className="draft-btn" onClick={() => setLaunched(false)}>Not yet</button>
+              </div>
+            </div>
+          )}
+          {(alreadyTracked || marked) && <div className="draft-note">✓ In your applications tracker.</div>}
+        </>
+      )}
+    </div>
+  )
 }
 
 function JobTags({ job }) {
   const tags = []
+  // Lifecycle chips first: a closed listing must never look apply-able, and a
+  // soon-to-close one should be obvious. Fields come from the backend.
+  if (job.is_closed) {
+    tags.push({ label: job.closed_reason === 'under_review' ? 'Under review' : 'Closed', cls: 'closed' })
+  } else if (job.closing_soon) {
+    tags.push({ label: job.days_left === 0 ? 'Closes today' : `Closing in ${job.days_left}d`, cls: 'orange' })
+  }
+  if (job.nysc_req === 'nysc_ok') tags.push({ label: 'Corps welcome', cls: '' })
+  else if (job.nysc_req === 'post_nysc') tags.push({ label: 'Post-NYSC', cls: '' })
+  else if (job.nysc_req === 'siwes') tags.push({ label: 'SIWES', cls: '' })
+  if (job.min_degree && DEGREE_LABELS[job.min_degree]) tags.push({ label: `Min ${DEGREE_LABELS[job.min_degree]}`, cls: '' })
   if (job.type) tags.push({ label: job.type, cls: '' })
   if (job.remote === 1) tags.push({ label: 'Remote', cls: 'orange' })
   if (job.experience_level) tags.push({ label: job.experience_level, cls: 'teal' })
@@ -38,7 +228,7 @@ function JobTags({ job }) {
 }
 
 function MiniJobCard({ job, isSaved, onToggleSave, onOpen }) {
-  const match = fakeMatchScore(job)
+  const reasons = matchReasons(job)
   const tag = job.type || (job.remote === 1 ? 'Remote' : null) || job.experience_level
   return (
     <div className="mini-card" onClick={() => onOpen(job)}>
@@ -55,9 +245,11 @@ function MiniJobCard({ job, isSaved, onToggleSave, onOpen }) {
       <div className="mini-card-company">{job.company}</div>
       <div className="mini-card-meta">{job.location || 'Location not specified'}</div>
       {tag && <div className="mini-card-tag">{tag}</div>}
-      <div className="mini-card-match">
-        <span className="mini-match-icon">◎</span> {match}% Match
-      </div>
+      {reasons.length > 0 && (
+        <div className="mini-card-match">
+          <span className="mini-match-icon">✓</span> {reasons[0]}
+        </div>
+      )}
     </div>
   )
 }
@@ -94,7 +286,7 @@ function JobCard({ job, featured, isSaved, onToggleSave, onOpen }) {
   const metaParts = [job.company, job.location, job.remote === 1 ? 'Remote' : null].filter(Boolean)
 
   if (featured) {
-    const match = fakeMatchScore(job)
+    const reasons = matchReasons(job)
     return (
       <div className="featured-card">
         <div className="job-top">
@@ -108,15 +300,15 @@ function JobCard({ job, featured, isSaved, onToggleSave, onOpen }) {
           </div>
         </div>
         <JobTags job={job} />
-        <div className="match-box">
-          <div className="match-icon">⚡</div>
-          <div className="match-text">
-            <div className="match-pct">Estimated match</div>
-            <div className="match-sub">Based on this listing's tags and level</div>
+        {reasons.length > 0 && (
+          <div className="match-box">
+            <div className="match-icon">⚡</div>
+            <div className="match-text">
+              <div className="match-pct">Why this showed up</div>
+              <div className="match-sub">{reasons.join(' · ')}</div>
+            </div>
           </div>
-          <div className="match-pill">{match}%</div>
-        </div>
-        <div className="match-bar-track"><div className="match-bar-fill" style={{ width: `${match}%` }} /></div>
+        )}
         <button className="job-cta" onClick={() => onOpen(job)}>
           View Opportunity →
         </button>
@@ -125,7 +317,7 @@ function JobCard({ job, featured, isSaved, onToggleSave, onOpen }) {
   }
 
   return (
-    <div className="job-card">
+    <div className={`job-card ${job.is_closed ? 'is-closed' : ''}`}>
       <div className="job-top">
         <div className="job-logo" onClick={() => onOpen(job)} style={{ cursor: 'pointer' }}>{initials(job.company)}</div>
         <div className="job-info job-title-link" onClick={() => onOpen(job)}>
@@ -138,14 +330,62 @@ function JobCard({ job, featured, isSaved, onToggleSave, onOpen }) {
       </div>
       <JobTags job={job} />
       <button className="job-cta" onClick={() => onOpen(job)}>
-        View opportunity →
+        {job.is_closed ? 'View details →' : 'View opportunity →'}
       </button>
     </div>
   )
 }
 
-function JobDetailPage({ job, isSaved, onToggleSave, onBack, onNavigate }) {
+function JobDetailPage({ job, isSaved, userSkills, apiFetch, userRealName, alreadyTracked, onMarkApplied, onToggleSave, onBack, onNavigate }) {
   const metaParts = [job.company, job.location, job.remote === 1 ? 'Remote' : null].filter(Boolean)
+
+  const jobSkills = (job.skills || '').split(',').map((s) => s.trim()).filter(Boolean)
+  const hasMatchData = userSkills && userSkills.length > 0 && jobSkills.length > 0
+  const matchedSkills = hasMatchData ? jobSkills.filter((s) => userSkills.includes(s)) : []
+  const missingSkills = hasMatchData ? jobSkills.filter((s) => !userSkills.includes(s)) : []
+  const matchPercent = hasMatchData ? Math.round((matchedSkills.length / jobSkills.length) * 100) : null
+
+  const [reportOpen, setReportOpen] = useState(false)
+  const [reportState, setReportState] = useState(null) // null | 'sending' | 'done' | 'error'
+
+  function sendReport(reason) {
+    setReportState('sending')
+    apiFetch(`/jobs/${job.id}/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+      .then((res) => { if (!res.ok) throw new Error('bad status'); setReportState('done') })
+      .catch(() => setReportState('error'))
+  }
+
+  const shareText = [job.title, [job.company, job.location].filter(Boolean).join(' · '), job.apply_url, 'Found on Undergrad']
+    .filter(Boolean).join('\n')
+  const checkedLabel = job.checked_days_ago == null ? 'Checked recently'
+    : job.checked_days_ago === 0 ? 'Checked today'
+    : `Checked ${job.checked_days_ago} day${job.checked_days_ago === 1 ? '' : 's'} ago`
+
+  const [tailoring, setTailoring] = useState(false)
+  const [tailorResult, setTailorResult] = useState(null)
+  const [tailorError, setTailorError] = useState(null)
+
+  function requestTailor() {
+    setTailoring(true)
+    setTailorError(null)
+    setTailorResult(null)
+    apiFetch(`/jobs/${job.id}/tailor`, { method: 'POST' })
+      .then(async (res) => {
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Something went wrong')
+        return data
+      })
+      .then((data) => {
+        setTailorResult(data)
+        trackEvent('resume_tailored', { job_id: job.id, match_score: data.match_score })
+      })
+      .catch((err) => setTailorError(err.message))
+      .finally(() => setTailoring(false))
+  }
 
   return (
     <div className="app">
@@ -161,22 +401,156 @@ function JobDetailPage({ job, isSaved, onToggleSave, onBack, onNavigate }) {
         <div className="detail-meta-row"><JobTags job={job} /></div>
       </div>
 
+      {hasMatchData && (
+        <div className="detail-summary" style={{ paddingTop: 4 }}>
+          <div style={{
+            background: 'linear-gradient(160deg, rgba(76,151,255,0.09), rgba(255,255,255,0.02))',
+            border: '1px solid rgba(76,151,255,0.2)', borderRadius: 18, padding: 16,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Skill match</h3>
+              <div style={{ fontSize: 20, fontWeight: 800, color: 'var(--lime-dim)' }}>{matchPercent}%</div>
+            </div>
+
+            {matchedSkills.length > 0 && (
+              <div className="skill-chips" style={{ marginBottom: missingSkills.length > 0 ? 10 : 0 }}>
+                {matchedSkills.map((s) => (
+                  <div key={s} className="skill-chip" style={{ color: 'var(--lime-dim)', background: 'rgba(76,151,255,0.08)' }}>
+                    ✓ {s}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {missingSkills.length > 0 && (
+              <div className="skill-chips">
+                {missingSkills.map((s) => (
+                  <div key={s} className="skill-chip" style={{ color: 'var(--orange)', background: 'rgba(255,94,77,0.08)' }}>
+                    ⚠ {s}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!job.is_closed && (
+        <div className="detail-summary" style={{ paddingTop: 12 }}>
+          <DraftPanel job={job} apiFetch={apiFetch} userName={userRealName} alreadyTracked={alreadyTracked} onMarkApplied={onMarkApplied} />
+        </div>
+      )}
+
+      <div className="detail-summary" style={{ paddingTop: 12 }}>
+        <button
+          className="sc-edit"
+          style={{ width: '100%', padding: '11px', textAlign: 'center', fontSize: 13 }}
+          onClick={requestTailor}
+          disabled={tailoring}
+        >
+          {tailoring ? 'Tailoring… this can take a minute' : '✨ Tailor my resume for this job'}
+        </button>
+
+        {tailorError && (
+          <div className="state-msg error" style={{ padding: '10px 0 0', textAlign: 'left' }}>{tailorError}</div>
+        )}
+
+        {tailorResult && (
+          <div style={{
+            marginTop: 12, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--stroke-soft)',
+            borderRadius: 16, padding: 16,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Resume match</h3>
+              <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--lime-dim)' }}>{tailorResult.match_score}%</div>
+            </div>
+
+            {tailorResult.strengths?.length > 0 && (
+              <>
+                <div className="resume-date" style={{ marginBottom: 6 }}>What's already working</div>
+                <ul style={{ margin: '0 0 12px', paddingLeft: 18, fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6 }}>
+                  {tailorResult.strengths.map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              </>
+            )}
+
+            {tailorResult.missing_keywords?.length > 0 && (
+              <>
+                <div className="resume-date" style={{ marginBottom: 6 }}>Missing from your resume</div>
+                <div className="skill-chips" style={{ marginBottom: 12 }}>
+                  {tailorResult.missing_keywords.map((k) => (
+                    <div key={k} className="skill-chip" style={{ color: 'var(--orange)', background: 'rgba(255,94,77,0.08)' }}>{k}</div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {tailorResult.tailored_bullets?.length > 0 && (
+              <>
+                <div className="resume-date" style={{ marginBottom: 6 }}>Suggested rewrites</div>
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: 'var(--text)', lineHeight: 1.7 }}>
+                  {tailorResult.tailored_bullets.map((b, i) => <li key={i}>{b}</li>)}
+                </ul>
+              </>
+            )}
+
+            <div className="resume-date" style={{ marginTop: 12, fontStyle: 'italic' }}>
+              Review before using — check every fact and fill in any [FILL IN] placeholders with real numbers.
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="detail-summary">
         <h3>About this listing</h3>
         <p style={{ whiteSpace: 'pre-line' }}>{job.summary ? job.summary.replace(/<[^>]+>/g, '') : 'No description provided by the source.'}</p>
       </div>
 
       <div className="detail-source-note">
-        Source: {job.source || 'unknown'} · Added {job.created_at ? new Date(job.created_at).toLocaleDateString() : 'recently'}
+        Source: {job.source || 'unknown'} · {checkedLabel}
+      </div>
+
+      {job.is_closed && (
+        <div className="detail-closed-banner">
+          {job.closed_reason === 'under_review'
+            ? 'This listing is under review after user reports. Do not apply or pay anything.'
+            : job.closed_reason === 'closed_by_source'
+              ? 'The source has taken this listing down. It is probably no longer open.'
+              : 'The deadline for this listing has passed.'}
+        </div>
+      )}
+
+      <div className="detail-safety">
+        <b>Never pay to apply.</b> Real employers don't charge for tests, interviews, forms or "processing".
+        <div className="detail-safety-actions">
+          <a href={`https://wa.me/?text=${encodeURIComponent(shareText)}`} target="_blank" rel="noopener noreferrer">Share on WhatsApp</a>
+          {reportState === 'done' ? (
+            <span>Thanks — reported.</span>
+          ) : (
+            <button type="button" onClick={() => setReportOpen((v) => !v)}>Report listing</button>
+          )}
+        </div>
+        {reportOpen && reportState !== 'done' && (
+          <div className="report-reasons">
+            {['Asked me to pay', 'Looks like a scam', 'Already closed', 'Wrong details'].map((r) => (
+              <button key={r} type="button" disabled={reportState === 'sending'} onClick={() => sendReport(r)}>{r}</button>
+            ))}
+            {reportState === 'error' && <div className="state-msg error" style={{ padding: '6px 0 0' }}>Couldn't send that — try again.</div>}
+          </div>
+        )}
       </div>
 
       <div className="detail-cta-wrap">
         <div className={`detail-save-btn ${isSaved ? 'saved' : ''}`} onClick={() => onToggleSave(job)}>
           {isSaved ? '♥' : '♡'}
         </div>
-        <a className="detail-apply-btn" href={job.apply_url} target="_blank" rel="noopener noreferrer">
-          Apply Now →
-        </a>
+        {job.is_closed ? (
+          <div className="detail-apply-btn disabled">Closed</div>
+        ) : (
+          <a className="detail-apply-btn" href={job.apply_url} target="_blank" rel="noopener noreferrer">
+            Apply Now →
+          </a>
+        )}
       </div>
 
       <div className="bottom-pad" />
@@ -185,7 +559,7 @@ function JobDetailPage({ job, isSaved, onToggleSave, onBack, onNavigate }) {
   )
 }
 
-function SavedPage({ savedJobs, loadError, onToggleSave, onOpen, onBack, onNavigate }) {
+function SavedPage({ savedJobs, loadError, fromCache, onToggleSave, onOpen, onBack, onNavigate }) {
   const list = Object.values(savedJobs)
   return (
     <div className="app">
@@ -194,6 +568,7 @@ function SavedPage({ savedJobs, loadError, onToggleSave, onOpen, onBack, onNavig
         <div className="subpage-title">Saved Opportunities</div>
       </div>
 
+      {fromCache && <div className="offline-note">You're offline or the server is unreachable — showing your last saved copy.</div>}
       {loadError ? (
         <div className="state-msg error">
           Couldn't load your saved jobs — check that the backend at {API_BASE} is running.
@@ -224,6 +599,8 @@ function FiltersModal({
   workStyleIdx, setWorkStyleIdx,
   activeType, setActiveType,
   activeLocation, setActiveLocation,
+  activeNysc, setActiveNysc,
+  activeDegree, setActiveDegree,
   locations,
   onClose, onReset, resultCount
 }) {
@@ -260,7 +637,30 @@ function FiltersModal({
             ))}
           </div>
           <div className="filters-note">
-            "Internship," "Full-time," "Part-time," and "Contract" are tagged from each listing's actual title/description. "SIWES" and "Graduate Program" are Nigeria-specific and will return 0 results for now — the current sources (Adzuna, RemoteOK, etc.) don't carry that data; that's what the 3MTT/HNG/Decagon scraping phase is for.
+            Types are tagged from each listing's title and description, so a few may be mislabelled.
+          </div>
+        </div>
+
+        <div className="filters-group">
+          <div className="filters-group-label">NYSC</div>
+          <div className="filters-chip-grid">
+            <button className={`chip ${activeNysc === '' ? 'active' : ''}`} onClick={() => setActiveNysc('')}>Any</button>
+            {NYSC_FILTERS.map(([v, l]) => (
+              <button key={v} className={`chip ${activeNysc === v ? 'active' : ''}`} onClick={() => setActiveNysc(activeNysc === v ? '' : v)}>{l}</button>
+            ))}
+          </div>
+        </div>
+
+        <div className="filters-group">
+          <div className="filters-group-label">My degree class</div>
+          <div className="filters-chip-grid">
+            <button className={`chip ${activeDegree === '' ? 'active' : ''}`} onClick={() => setActiveDegree('')}>Any</button>
+            {Object.entries(DEGREE_LABELS).map(([v, l]) => (
+              <button key={v} className={`chip ${activeDegree === v ? 'active' : ''}`} onClick={() => setActiveDegree(activeDegree === v ? '' : v)}>{l}</button>
+            ))}
+          </div>
+          <div className="filters-note">
+            Hides roles that say they need a higher class than yours. Roles that don't state a requirement stay visible. NYSC and grade tags are read from each listing's own text, so they can miss things — always check the original posting.
           </div>
         </div>
 
@@ -360,8 +760,9 @@ function ActivityChart({ data, days }) {
   )
 }
 
-function DashboardPage({ userName, jobs, savedJobs, applications, onToggleSave, onOpen, onGoExplore, onGoApplications, onGoSaved, onGoProfile, onNavigate }) {
-  const recommended = jobs.slice(0, 4)
+function DashboardPage({ userName, jobs, forYou, onboarding, onEditPreferences, savedJobs, applications, onToggleSave, onOpen, onGoExplore, onGoApplications, onGoSaved, onGoProfile, onNavigate }) {
+  const personalised = forYou.length > 0
+  const recommended = personalised ? forYou.slice(0, 6) : jobs.slice(0, 4)
   const savedCount = Object.keys(savedJobs).length
   const active = applications.filter((a) => a.status !== 'Archived').length
   const interviews = applications.filter((a) => a.status === 'Interview').length
@@ -503,6 +904,19 @@ function DashboardPage({ userName, jobs, savedJobs, applications, onToggleSave, 
         </div>
       </div>
 
+      {(!onboarding || onboarding.skipped) ? (
+        <div className="prefs-card">
+          <b>Get roles ranked for you</b>
+          <span>Four quick taps: your stage, field, location and the roles you want.</span>
+          <button type="button" onClick={onEditPreferences}>Set my preferences</button>
+        </div>
+      ) : (
+        <div className="prefs-link">
+          {personalised ? 'Ranked for you' : 'No close matches yet — showing the newest roles'} ·{' '}
+          <button type="button" onClick={onEditPreferences}>Edit preferences</button>
+        </div>
+      )}
+
       {recommended.length === 0 ? (
         <div className="state-msg" style={{ margin: '0 20px' }}>No opportunities loaded yet — check the backend connection on Explore.</div>
       ) : (
@@ -520,16 +934,19 @@ function DashboardPage({ userName, jobs, savedJobs, applications, onToggleSave, 
     </div>
   )
 }
-const APP_TABS = ['All', 'Active', 'Interview', 'Offer', 'Archived']
-const APP_STATUSES = ['Applied', 'Under Review', 'Interview', 'Offer', 'Rejected', 'Archived']
+const APP_TABS = ['All', 'Active', 'Aptitude Test', 'Interview', 'Offer', 'Archived']
+const APP_STATUSES = ['Applied', 'Under Review', 'Aptitude Test', 'Interview', 'Offer', 'Rejected', 'Archived']
+// 'Rejected' is stored as before (existing data keeps working); the student sees the gentler label.
+const statusLabel = (s) => (s === 'Rejected' ? 'Not selected' : s)
 
 function statusColor(status) {
   switch (status) {
-    case 'Interview': return { bg: 'rgba(63,224,190,0.16)', fg: 'var(--teal)' }
-    case 'Offer': return { bg: 'rgba(223,242,92,0.18)', fg: 'var(--lime-dim)' }
-    case 'Rejected': return { bg: 'rgba(255,145,89,0.16)', fg: 'var(--orange)' }
+    case 'Aptitude Test': return { bg: 'rgba(245,196,81,0.16)', fg: '#f5c451' }
+    case 'Interview': return { bg: 'rgba(56,214,196,0.16)', fg: 'var(--teal)' }
+    case 'Offer': return { bg: 'rgba(94,214,130,0.16)', fg: '#5ED682' }
+    case 'Rejected': return { bg: 'rgba(255,94,77,0.16)', fg: 'var(--orange)' }
     case 'Archived': return { bg: 'rgba(255,255,255,0.06)', fg: 'var(--muted-2)' }
-    default: return { bg: 'rgba(255,145,89,0.16)', fg: 'var(--orange)' }
+    default: return { bg: 'rgba(76,151,255,0.16)', fg: 'var(--lime-dim)' }
   }
 }
 
@@ -575,7 +992,7 @@ function AddApplicationModal({ onClose, onAdd }) {
         <div className="form-field">
           <label>Status</label>
           <select value={status} onChange={(e) => setStatus(e.target.value)}>
-            {APP_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            {APP_STATUSES.map((s) => <option key={s} value={s}>{statusLabel(s)}</option>)}
           </select>
         </div>
 
@@ -587,7 +1004,28 @@ function AddApplicationModal({ onClose, onAdd }) {
   )
 }
 
-function ApplicationsPage({ applications, loadError, onAddApplication, onUpdateStatus, onDeleteApplication, onBack, onNavigate }) {
+function AppNotes({ app, onSave }) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(app.notes || '')
+  if (!editing) {
+    return (
+      <div className="app-notes" onClick={() => setEditing(true)}>
+        {app.notes ? app.notes : <span className="app-notes-empty">+ Add a note (test date, contact, link…)</span>}
+      </div>
+    )
+  }
+  return (
+    <div className="app-notes-edit">
+      <textarea rows={3} value={text} maxLength={1000} onChange={(e) => setText(e.target.value)} autoFocus />
+      <div className="draft-actions">
+        <button type="button" className="draft-btn primary" onClick={() => { onSave(app.id, text.trim()); setEditing(false) }}>Save</button>
+        <button type="button" className="draft-btn" onClick={() => { setText(app.notes || ''); setEditing(false) }}>Cancel</button>
+      </div>
+    </div>
+  )
+}
+
+function ApplicationsPage({ applications, loadError, onAddApplication, onUpdateStatus, onUpdateNotes, onDeleteApplication, onBack, onNavigate }) {
   const [activeTab, setActiveTab] = useState('All')
   const [showAddModal, setShowAddModal] = useState(false)
 
@@ -660,19 +1098,26 @@ function ApplicationsPage({ applications, loadError, onAddApplication, onUpdateS
             return (
               <div key={a.id} className="app-card">
                 <div className="app-top">
-                  <div className="app-logo" style={{ background: bg, color: fg }}>{a.company.charAt(0).toUpperCase()}</div>
+                  <div className="app-logo" style={{ background: bg, color: fg }}>{(a.company || '?').charAt(0).toUpperCase()}</div>
                   <div className="app-info">
                     <div className="app-title">{a.title}</div>
-                    <div className="app-meta">{a.company} · {a.location}</div>
+                    <div className="app-meta">
+                      {a.company} · {a.location}
+                      {a.listing_closed && <span className="job-tag closed" style={{ marginLeft: 8 }}>Listing closed</span>}
+                    </div>
                   </div>
-                  <div className="status-badge" style={{ background: bg, color: fg }}>{a.status}</div>
+                  <div className="status-badge" style={{ background: bg, color: fg }}>{statusLabel(a.status)}</div>
                 </div>
                 <div className="app-footer">
                   <span>Applied {a.appliedDate}</span>
                 </div>
+                {a.status === 'Applied' && (daysSince(a.applied_date || a.created_at) ?? 0) >= 14 && (
+                  <div className="app-reminder">Applied 14+ days ago — check your spam folder for replies, then update the stage.</div>
+                )}
+                <AppNotes app={a} onSave={onUpdateNotes} />
                 <div className="app-actions">
                   <select className="app-status-select" value={a.status} onChange={(e) => updateStatus(a.id, e.target.value)}>
-                    {APP_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                    {APP_STATUSES.map((s) => <option key={s} value={s}>{statusLabel(s)}</option>)}
                   </select>
                   <div className="app-del-btn" onClick={() => removeApp(a.id)}>✕</div>
                 </div>
@@ -708,6 +1153,12 @@ function ProfilePage({ savedCount, applicationsCount, apiFetch, authUser, onLogo
   const [resumeUploadedAt, setResumeUploadedAt] = useState(null)
   const [resumeUploading, setResumeUploading] = useState(false)
   const [resumeError, setResumeError] = useState(null)
+  const [suggestedSkills, setSuggestedSkills] = useState([])
+  const [feedbackMessage, setFeedbackMessage] = useState('')
+  const [feedbackCategory, setFeedbackCategory] = useState('suggestion')
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
+  const [feedbackSent, setFeedbackSent] = useState(false)
+  const [feedbackError, setFeedbackError] = useState(null)
   const fileInputRef = useRef(null)
 
   useEffect(() => {
@@ -760,6 +1211,8 @@ function ProfilePage({ savedCount, applicationsCount, apiFetch, authUser, onLogo
       .then((data) => {
         setResumeName(data.resume_original_name)
         setResumeUploadedAt(data.resume_uploaded_at)
+        setSuggestedSkills(data.suggested_skills || [])
+        trackEvent('resume_uploaded', { skills_found: (data.suggested_skills || []).length })
       })
       .catch((err) => setResumeError(typeof err === 'string' ? err : 'Upload failed — try again.'))
       .finally(() => setResumeUploading(false))
@@ -783,6 +1236,28 @@ function ProfilePage({ savedCount, applicationsCount, apiFetch, authUser, onLogo
     const d = new Date(dateStr.replace(' ', 'T'))
     if (isNaN(d.getTime())) return ''
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+
+  function submitFeedback() {
+    if (!feedbackMessage.trim()) {
+      setFeedbackError('Write something first.')
+      return
+    }
+    setFeedbackError(null)
+    setFeedbackSubmitting(true)
+    apiFetch('/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: feedbackMessage.trim(), category: feedbackCategory }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Failed to send')
+        setFeedbackMessage('')
+        setFeedbackSent(true)
+        setTimeout(() => setFeedbackSent(false), 4000)
+      })
+      .catch(() => setFeedbackError("Couldn't send that — try again."))
+      .finally(() => setFeedbackSubmitting(false))
   }
 
   function saveProfile(patch) {
@@ -817,6 +1292,22 @@ function ProfilePage({ savedCount, applicationsCount, apiFetch, authUser, onLogo
     const next = skills.filter((s) => s !== skill)
     setSkills(next)
     saveProfile({ skills: next })
+  }
+
+  function acceptSuggestedSkill(skill) {
+    if (!skills.includes(skill)) {
+      const next = [...skills, skill]
+      setSkills(next)
+      saveProfile({ skills: next })
+    }
+    setSuggestedSkills((prev) => prev.filter((s) => s !== skill))
+  }
+
+  function acceptAllSuggestedSkills() {
+    const merged = [...new Set([...skills, ...suggestedSkills])]
+    setSkills(merged)
+    saveProfile({ skills: merged })
+    setSuggestedSkills([])
   }
 
   // Rough, transparent "profile strength" — just a count of filled sections, not a real scoring model.
@@ -908,6 +1399,21 @@ function ProfilePage({ savedCount, applicationsCount, apiFetch, authUser, onLogo
           {resumeError && (
             <div className="resume-date" style={{ color: 'var(--orange)', marginTop: 8 }}>{resumeError}</div>
           )}
+          {suggestedSkills.length > 0 && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--stroke-soft)' }}>
+              <div className="resume-date" style={{ marginBottom: 8 }}>
+                Found {suggestedSkills.length} skill{suggestedSkills.length > 1 ? 's' : ''} in your resume not yet on your profile:
+              </div>
+              <div className="skill-chips" style={{ marginBottom: 10 }}>
+                {suggestedSkills.map((s) => (
+                  <div key={s} className="skill-chip" style={{ cursor: 'pointer' }} onClick={() => acceptSuggestedSkill(s)}>
+                    + {s}
+                  </div>
+                ))}
+              </div>
+              <button className="sc-edit" onClick={acceptAllSuggestedSkills}>Add all</button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -966,9 +1472,55 @@ function ProfilePage({ savedCount, applicationsCount, apiFetch, authUser, onLogo
 
       <div className="section">
         <div className="section-card">
+          <div className="sc-head"><h3>Send Feedback</h3></div>
+          <p style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginBottom: 12 }}>
+            Found a bug, or have an idea to make this better? Tell us directly — it goes straight
+            to the developer.
+          </p>
+
+          <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+            {['suggestion', 'bug', 'other'].map((cat) => (
+              <button
+                key={cat}
+                className="sc-edit"
+                style={feedbackCategory === cat ? { background: 'var(--lime)', color: '#1A0D05' } : {}}
+                onClick={() => setFeedbackCategory(cat)}
+              >
+                {cat === 'suggestion' ? 'Suggestion' : cat === 'bug' ? 'Bug' : 'Other'}
+              </button>
+            ))}
+          </div>
+
+          <textarea
+            value={feedbackMessage}
+            onChange={(e) => setFeedbackMessage(e.target.value)}
+            placeholder={
+              feedbackCategory === 'bug'
+                ? "What went wrong? What were you doing when it happened?"
+                : "What would make this app better for you?"
+            }
+            rows={4}
+            style={{
+              width: '100%', background: 'rgba(255,255,255,0.045)', border: '1px solid var(--stroke-soft)',
+              borderRadius: 12, padding: '11px 13px', color: 'var(--text)', fontFamily: 'inherit', fontSize: 13,
+              fontWeight: 500, marginBottom: 10,
+            }}
+          />
+
+          {feedbackError && <div className="resume-date" style={{ color: 'var(--orange)', marginBottom: 10 }}>{feedbackError}</div>}
+          {feedbackSent && <div className="resume-date" style={{ color: 'var(--lime-dim)', marginBottom: 10 }}>Thanks — got it!</div>}
+
+          <button className="filters-apply-btn" onClick={submitFeedback} disabled={feedbackSubmitting}>
+            {feedbackSubmitting ? 'Sending…' : 'Send'}
+          </button>
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-card">
           <div className="sc-head"><h3>Experience</h3></div>
           <div className="exp-item">
-            <div className="exp-icon" style={{ background: 'rgba(155,107,255,0.16)', color: 'var(--violet)' }}>💼</div>
+            <div className="exp-icon" style={{ background: 'rgba(242,181,68,0.16)', color: 'var(--violet)' }}>💼</div>
             <div>
               <div className="exp-role">SIWES Trainee, Cloud & Security</div>
               <div className="exp-org">United Bank for Africa</div>
@@ -976,7 +1528,7 @@ function ProfilePage({ savedCount, applicationsCount, apiFetch, authUser, onLogo
             </div>
           </div>
           <div className="exp-item">
-            <div className="exp-icon" style={{ background: 'rgba(63,224,190,0.16)', color: 'var(--teal)' }}>🎓</div>
+            <div className="exp-icon" style={{ background: 'rgba(56,214,196,0.16)', color: 'var(--teal)' }}>🎓</div>
             <div>
               <div className="exp-role">AI &amp; ML Scholar</div>
               <div className="exp-org">Udacity × AWS Program · Ongoing</div>
@@ -992,12 +1544,177 @@ function ProfilePage({ savedCount, applicationsCount, apiFetch, authUser, onLogo
   )
 }
 
+function SubmitJobPage({ apiFetch, onBack }) {
+  const [mode, setMode] = useState('url') // url | text
+  const [url, setUrl] = useState('')
+  const [text, setText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [result, setResult] = useState(null) // { added, title, company, extraction_method }
+  const [error, setError] = useState(null)
+
+  function submit() {
+    setError(null)
+    setResult(null)
+
+    const body = mode === 'url' ? { url: url.trim() } : { text: text.trim() }
+    if ((mode === 'url' && !url.trim()) || (mode === 'text' && !text.trim())) {
+      setError(mode === 'url' ? 'Paste a job posting URL first.' : 'Paste the job details first.')
+      return
+    }
+
+    setSubmitting(true)
+    apiFetch('/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(async (res) => {
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Something went wrong')
+        return data
+      })
+      .then((data) => {
+        setResult(data)
+        setUrl('')
+        setText('')
+        trackEvent('job_submitted', { extraction_method: data.extraction_method })
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setSubmitting(false))
+  }
+
+  return (
+    <div className="app">
+      <div className="subpage-header">
+        <button className="back-btn" onClick={onBack}>←</button>
+        <div className="subpage-title">Submit a Job</div>
+      </div>
+
+      <div className="section" style={{ paddingTop: 0 }}>
+        <div className="section-card">
+          <p style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5, marginBottom: 14 }}>
+            Found something we don't have — a link, a forwarded message, a tweet? Paste it below
+            and we'll try to pull out the job details automatically. Submitted jobs are flagged
+            for review before showing up for everyone.
+          </p>
+
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+            <button
+              className="sc-edit"
+              style={mode === 'url' ? { background: 'var(--lime)', color: '#1A0D05' } : {}}
+              onClick={() => setMode('url')}
+            >
+              Link
+            </button>
+            <button
+              className="sc-edit"
+              style={mode === 'text' ? { background: 'var(--lime)', color: '#1A0D05' } : {}}
+              onClick={() => setMode('text')}
+            >
+              Pasted text
+            </button>
+          </div>
+
+          {mode === 'url' ? (
+            <div className="form-field" style={{ margin: '0 0 14px' }}>
+              <label>Job posting URL</label>
+              <input
+                type="text"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="https://..."
+              />
+            </div>
+          ) : (
+            <div className="form-field" style={{ margin: '0 0 14px' }}>
+              <label>Paste the job details</label>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Paste the forwarded message, tweet text, or job description here..."
+                rows={6}
+                style={{
+                  width: '100%', background: 'rgba(255,255,255,0.045)', border: '1px solid var(--stroke-soft)',
+                  borderRadius: 12, padding: '11px 13px', color: 'var(--text)', fontFamily: 'inherit', fontSize: 13, fontWeight: 500,
+                }}
+              />
+            </div>
+          )}
+
+          {error && <div className="state-msg error" style={{ padding: '0 0 14px', textAlign: 'left' }}>{error}</div>}
+
+          {result && (
+            <div className="state-msg" style={{ padding: '0 0 14px', textAlign: 'left', color: 'var(--lime-dim)' }}>
+              Added: <b>{result.title}</b>{result.company ? ` at ${result.company}` : ''} — pending review.
+            </div>
+          )}
+
+          <button className="filters-apply-btn" onClick={submit} disabled={submitting}>
+            {submitting ? 'Processing…' : 'Submit'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AuthPage({ onAuthSuccess }) {
   const [mode, setMode] = useState('login') // login | signup
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [website, setWebsite] = useState('') // honeypot field, see backend routes/auth.py
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
+  const googleButtonRef = useRef(null)
+  const [googleReady, setGoogleReady] = useState(false)
+
+  function handleGoogleCredential(response) {
+    setError(null)
+    fetch(`${API_BASE}/auth/google`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ id_token: response.credential }),
+    })
+      .then(async (res) => {
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Google sign-in failed')
+        return data
+      })
+      .then((data) => onAuthSuccess(data.token, data.user))
+      .catch((err) => setError(err.message))
+  }
+
+  useEffect(() => {
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+    // Gracefully does nothing if not configured yet (e.g. still setting up
+    // the domain/deployment) — the normal email/password form still works
+    // fine on its own either way.
+    if (!clientId) return
+
+    let attempts = 0
+    const tryInit = () => {
+      attempts += 1
+      if (window.google?.accounts?.id) {
+        window.google.accounts.id.initialize({
+          client_id: clientId,
+          callback: handleGoogleCredential,
+        })
+        if (googleButtonRef.current) {
+          window.google.accounts.id.renderButton(googleButtonRef.current, {
+            theme: 'filled_black',
+            size: 'large',
+            width: 320,
+            shape: 'pill',
+          })
+        }
+        setGoogleReady(true)
+      } else if (attempts < 20) {
+        setTimeout(tryInit, 250) // the GSI script loads async, may not be ready on first render
+      }
+    }
+    tryInit()
+  }, [])
 
   function submit(e) {
     e.preventDefault()
@@ -1016,7 +1733,8 @@ function AuthPage({ onAuthSuccess }) {
     fetch(`${API_BASE}/auth/${mode}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim(), password }),
+      credentials: 'include',
+      body: JSON.stringify({ email: email.trim(), password, website }),
     })
       .then(async (res) => {
         const data = await res.json()
@@ -1042,6 +1760,19 @@ function AuthPage({ onAuthSuccess }) {
           </div>
 
           <form onSubmit={submit}>
+            {/* Honeypot — real users never see this (off-screen, not display:none,
+                since some bots specifically skip display:none fields). Left blank by
+                humans; a bot that auto-fills every input will fill it in. */}
+            <input
+              type="text"
+              name="website"
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+              tabIndex={-1}
+              autoComplete="off"
+              aria-hidden="true"
+              style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
+            />
             <div className="form-field" style={{ margin: '0 0 14px' }}>
               <label>Email</label>
               <input
@@ -1074,6 +1805,17 @@ function AuthPage({ onAuthSuccess }) {
             </button>
           </form>
 
+          {googleReady && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '16px 0' }}>
+                <div style={{ flex: 1, height: 1, background: 'var(--stroke-soft)' }} />
+                <div style={{ fontSize: 11, color: 'var(--muted-2)', fontWeight: 700 }}>OR</div>
+                <div style={{ flex: 1, height: 1, background: 'var(--stroke-soft)' }} />
+              </div>
+              <div ref={googleButtonRef} style={{ display: 'flex', justifyContent: 'center' }} />
+            </>
+          )}
+
           <div style={{ textAlign: 'center', marginTop: 16, fontSize: 12.5, color: 'var(--muted)' }}>
             {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
             <span
@@ -1093,44 +1835,43 @@ function AuthPage({ onAuthSuccess }) {
 }
 
 export default function App() {
-  const [authToken, setAuthToken] = useState(() => localStorage.getItem('undergrad_token') || null)
   const [authUser, setAuthUser] = useState(null)
+  const [userSkills, setUserSkills] = useState([])
   const [authChecking, setAuthChecking] = useState(true)
 
   function apiFetch(path, options = {}) {
-    const headers = { ...(options.headers || {}) }
-    if (authToken) headers['Authorization'] = `Bearer ${authToken}`
-    return fetch(`${API_BASE}${path}`, { ...options, headers }).then((res) => {
+    // credentials: 'include' is what actually sends/receives the httpOnly
+    // cookie — no token is read from or attached by JS at all anymore, so
+    // there's nothing here for an XSS payload to steal.
+    return fetch(`${API_BASE}${path}`, { ...options, credentials: 'include' }).then((res) => {
       if (res.status === 401) logout()
       return res
     })
   }
 
-  function persistAuth(token, user) {
-    localStorage.setItem('undergrad_token', token)
-    setAuthToken(token)
+  function persistAuth(_token, user) {
+    // The cookie was already set by the server's Set-Cookie response header
+    // during signup/login — nothing to store here, just update UI state.
     setAuthUser(user)
   }
 
   function logout() {
-    localStorage.removeItem('undergrad_token')
-    setAuthToken(null)
+    fetch(`${API_BASE}/auth/logout`, { method: 'POST', credentials: 'include' }).catch(() => {})
     setAuthUser(null)
     // clear anything that belonged to the previous session so a different
     // user logging in on the same device never briefly sees stale data
+    try { if (authUser) localStorage.removeItem(`undergrad_saved_${authUser.id}`) } catch { /* private mode */ }
     setSavedJobs({})
     setApplications([])
+    setOnboarding(null); setOnboardingLoaded(false); setOnbOpen(false); setForYou([])
+    setSavedLoaded(false); setSavedFromCache(false)
     setView('explore')
   }
 
   useEffect(() => {
-    if (!authToken) {
-      setAuthChecking(false)
-      return
-    }
-    fetch(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${authToken}` } })
+    fetch(`${API_BASE}/auth/me`, { credentials: 'include' })
       .then((res) => {
-        if (!res.ok) throw new Error('invalid session')
+        if (!res.ok) throw new Error('not logged in')
         return res.json()
       })
       .then((user) => {
@@ -1138,18 +1879,28 @@ export default function App() {
         setAuthChecking(false)
       })
       .catch(() => {
-        localStorage.removeItem('undergrad_token')
-        setAuthToken(null)
         setAuthUser(null)
         setAuthChecking(false)
       })
   }, [])
 
   const [view, setView] = useState('explore') // explore | detail | saved | applications | profile | dashboard
+
+  useEffect(() => {
+    trackEvent('page_view', { page: view })
+  }, [view])
   const [selectedJob, setSelectedJob] = useState(null)
   const [savedJobs, setSavedJobs] = useState({}) // keyed by listing id, persisted via /saved API
   const [applications, setApplications] = useState([]) // persisted via /applications API
   const [savedLoadError, setSavedLoadError] = useState(false)
+  const [savedFromCache, setSavedFromCache] = useState(false)
+  const [savedLoaded, setSavedLoaded] = useState(false)
+  const [onboarding, setOnboarding] = useState(null)
+  const [onboardingLoaded, setOnboardingLoaded] = useState(false)
+  const [onbOpen, setOnbOpen] = useState(false)
+  const [forYou, setForYou] = useState([])
+  const [activeNysc, setActiveNysc] = useState('')
+  const [activeDegree, setActiveDegree] = useState('')
   const [applicationsLoadError, setApplicationsLoadError] = useState(false)
 
   const [search, setSearch] = useState('')
@@ -1180,6 +1931,7 @@ export default function App() {
 
   function toggleSave(job) {
     const isSaved = !!savedJobs[job.id]
+    trackEvent(isSaved ? 'job_unsaved' : 'job_saved', { job_id: job.id, category: job.category })
     // optimistic update
     setSavedJobs((prev) => {
       const next = { ...prev }
@@ -1206,6 +1958,7 @@ export default function App() {
   }
 
   function addApplication(app) {
+    trackEvent('application_added')
     // optimistic temp entry, replaced once the server assigns a real id
     const tempId = `temp-${Date.now()}`
     setApplications((prev) => [{ ...app, id: tempId }, ...prev])
@@ -1218,6 +1971,7 @@ export default function App() {
         location: app.location,
         status: app.status,
         applied_date: app.applied_date,
+        listing_id: app.listing_id || null,
       }),
     })
       .then((res) => res.json())
@@ -1230,6 +1984,7 @@ export default function App() {
   }
 
   function updateApplicationStatus(id, newStatus) {
+    trackEvent('application_status_changed', { new_status: newStatus })
     setApplications((prev) => prev.map((a) => (a.id === id ? { ...a, status: newStatus } : a)))
     apiFetch(`/applications/${id}`, {
       method: 'PATCH',
@@ -1239,6 +1994,7 @@ export default function App() {
   }
 
   function deleteApplication(id) {
+    trackEvent('application_deleted')
     const prevApps = applications
     setApplications((prev) => prev.filter((a) => a.id !== id))
     apiFetch(`/applications/${id}`, { method: 'DELETE' }).catch(() => {
@@ -1247,20 +2003,30 @@ export default function App() {
   }
 
   function openJob(job) {
+    trackEvent('job_viewed', { job_id: job.id, category: job.category, source: job.source })
     setSelectedJob(job)
     setView('detail')
   }
 
   useEffect(() => {
-    if (!authToken) return
+    if (!authUser) return
     apiFetch('/saved')
       .then((res) => res.json())
       .then((data) => {
         const map = {}
         for (const job of data.saved || []) map[job.id] = job
         setSavedJobs(map)
+        setSavedFromCache(false)
+        setSavedLoaded(true)
       })
-      .catch(() => setSavedLoadError(true))
+      .catch(() => {
+        // spotty campus connection: fall back to the last copy we stored on this device
+        try {
+          const cached = JSON.parse(localStorage.getItem(`undergrad_saved_${authUser.id}`) || 'null')
+          if (cached && Object.keys(cached).length) { setSavedJobs(cached); setSavedFromCache(true); return }
+        } catch { /* ignore */ }
+        setSavedLoadError(true)
+      })
 
     apiFetch('/applications')
       .then((res) => res.json())
@@ -1272,7 +2038,76 @@ export default function App() {
         setApplications(mapped)
       })
       .catch(() => setApplicationsLoadError(true))
-  }, [authToken])
+
+    apiFetch('/profile')
+      .then((res) => res.json())
+      .then((data) => {
+        setUserSkills(data.skills || [])
+        setOnboarding(data.onboarding || null)
+        setOnboardingLoaded(true)
+      })
+      .catch(() => {}) // match score simply won't show if this fails — not critical enough to surface an error for
+  }, [authUser])
+
+  // keep an on-device copy of saved jobs (only after the server copy has loaded, so we never overwrite it with {})
+  useEffect(() => {
+    if (!authUser || !savedLoaded) return
+    try { localStorage.setItem(`undergrad_saved_${authUser.id}`, JSON.stringify(savedJobs)) } catch { /* storage full / private mode */ }
+  }, [savedJobs, savedLoaded, authUser])
+
+  useEffect(() => {
+    if (!authUser || !onboarding || onboarding.skipped) { setForYou([]); return }
+    apiFetch('/jobs/for-you?limit=6')
+      .then((res) => res.json())
+      .then((data) => setForYou(data.jobs || []))
+      .catch(() => setForYou([]))
+  }, [authUser, onboarding])
+
+  function savePreferences(payload) {
+    return apiFetch('/profile', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ onboarding: payload }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error('save failed')
+      const data = await res.json()
+      setOnboarding(data.onboarding || payload)
+      setOnbOpen(false)
+      trackEvent('onboarding_completed')
+      setView('dashboard')
+    })
+  }
+
+  function skipPreferences() {
+    setOnbOpen(false)
+    if (onboarding) return // editing existing answers: just close
+    apiFetch('/profile', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ onboarding: { skipped: true } }),
+    }).then(() => setOnboarding({ skipped: true })).catch(() => setOnboarding({ skipped: true }))
+  }
+
+  function markApplied(job) {
+    addApplication({
+      company: job.company || 'Unknown company',
+      title: job.title,
+      location: job.location || 'Not specified',
+      status: 'Applied',
+      applied_date: new Date().toISOString().slice(0, 10),
+      appliedDate: formatAppliedDate(new Date().toISOString()),
+      listing_id: job.id,
+    })
+  }
+
+  function updateApplicationNotes(id, notes) {
+    setApplications((prev) => prev.map((a) => (a.id === id ? { ...a, notes } : a)))
+    apiFetch(`/applications/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes }),
+    }).catch(() => {})
+  }
 
   useEffect(() => {
     fetch(`${API_BASE}/jobs/locations`)
@@ -1294,8 +2129,10 @@ export default function App() {
     if (remote !== null) p.set('remote', String(remote))
     if (activeType) p.set('job_type', activeType)
     if (activeLocation) p.set('location', activeLocation)
+    if (activeNysc) p.set('nysc', activeNysc)
+    if (activeDegree) p.set('my_degree', activeDegree)
     return p
-  }, [debouncedSearch, workStyleIdx, activeType, activeLocation])
+  }, [debouncedSearch, workStyleIdx, activeType, activeLocation, activeNysc, activeDegree])
 
   useEffect(() => {
     const id = ++requestId.current
@@ -1315,6 +2152,17 @@ export default function App() {
         if (id !== requestId.current) return
         setJobs(data.jobs || [])
         setTotal(data.total || 0)
+        // only track when a real filter/search is active — skip the default
+        // "just opened the app" load, since that's not a meaningful signal
+        const hasActiveFilter = debouncedSearch || workStyleIdx !== 0 || activeType || activeLocation
+        if (hasActiveFilter) {
+          trackEvent('filters_applied', {
+            search: debouncedSearch || null,
+            work_style: WORK_STYLE_CHIPS[workStyleIdx].label,
+            job_type: activeType || null,
+            location: activeLocation || null,
+          })
+        }
       })
       .catch((err) => {
         if (id !== requestId.current) return
@@ -1350,6 +2198,8 @@ export default function App() {
     setWorkStyleIdx(0)
     setActiveType('')
     setActiveLocation('')
+    setActiveNysc('')
+    setActiveDegree('')
   }
 
   const hasMore = jobs.length < total
@@ -1362,8 +2212,12 @@ export default function App() {
     )
   }
 
-  if (!authToken || !authUser) {
+  if (!authUser) {
     return <AuthPage onAuthSuccess={(token, user) => persistAuth(token, user)} />
+  }
+
+  if (onbOpen || (onboardingLoaded && onboarding === null)) {
+    return <OnboardingPage onSave={savePreferences} onSkip={skipPreferences} />
   }
 
   if (view === 'detail' && selectedJob) {
@@ -1371,6 +2225,11 @@ export default function App() {
       <JobDetailPage
         job={selectedJob}
         isSaved={!!savedJobs[selectedJob.id]}
+        userSkills={userSkills}
+        apiFetch={apiFetch}
+        userRealName={authUser.name || ''}
+        alreadyTracked={applications.some((a) => a.listing_id === selectedJob.id)}
+        onMarkApplied={() => markApplied(selectedJob)}
         onToggleSave={toggleSave}
         onBack={() => setView('explore')}
         onNavigate={setView}
@@ -1383,6 +2242,7 @@ export default function App() {
       <SavedPage
         savedJobs={savedJobs}
         loadError={savedLoadError}
+        fromCache={savedFromCache}
         onToggleSave={toggleSave}
         onOpen={openJob}
         onBack={() => setView('explore')}
@@ -1394,7 +2254,10 @@ export default function App() {
   if (view === 'dashboard') {
     return (
       <DashboardPage
-        userName="Abbas"
+        userName={authUser.name || (authUser.email ? authUser.email.split('@')[0] : 'there')}
+        forYou={forYou}
+        onboarding={onboarding}
+        onEditPreferences={() => setOnbOpen(true)}
         jobs={jobs}
         savedJobs={savedJobs}
         applications={applications}
@@ -1416,6 +2279,7 @@ export default function App() {
         loadError={applicationsLoadError}
         onAddApplication={addApplication}
         onUpdateStatus={updateApplicationStatus}
+        onUpdateNotes={updateApplicationNotes}
         onDeleteApplication={deleteApplication}
         onBack={() => setView('explore')}
         onNavigate={setView}
@@ -1437,6 +2301,10 @@ export default function App() {
     )
   }
 
+  if (view === 'submit') {
+    return <SubmitJobPage apiFetch={apiFetch} onBack={() => setView('explore')} />
+  }
+
   return (
     <div className="app">
       <div className="header">
@@ -1444,7 +2312,7 @@ export default function App() {
           <img src={LOGO_DATA_URI} className="logo-mark" alt="Undergrad U" />
           <span className="wordmark">under<b>grad</b></span>
         </div>
-        <div className="bell">🔔</div>
+        <div className="bell" onClick={() => setView('submit')} title="Submit a job">➕</div>
       </div>
 
       <div className="hero">
@@ -1546,6 +2414,8 @@ export default function App() {
           workStyleIdx={workStyleIdx} setWorkStyleIdx={setWorkStyleIdx}
           activeType={activeType} setActiveType={setActiveType}
           activeLocation={activeLocation} setActiveLocation={setActiveLocation}
+          activeNysc={activeNysc} setActiveNysc={setActiveNysc}
+          activeDegree={activeDegree} setActiveDegree={setActiveDegree}
           locations={locations}
           onClose={() => setFiltersOpen(false)}
           onReset={resetFilters}

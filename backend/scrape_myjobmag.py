@@ -27,8 +27,9 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
-from db import insert_listing
+from db import insert_listing, touch_listings, close_listing_by_url
 from tag_listings import infer_tags
+from listing_summarizer import summarize_listing
 
 logger = logging.getLogger("scrape_myjobmag")
 
@@ -93,6 +94,7 @@ def parse_listing_page(url, html):
 
     if re.search(r"has expired", full_text, re.IGNORECASE):
         logger.info(f"Listing expired, skipping: {url}")
+        close_listing_by_url(url)  # the source itself says it's over
         return None
 
     title_tag = soup.find("h1") or soup.find("h2")
@@ -120,18 +122,21 @@ def parse_listing_page(url, html):
 
     paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
     paragraphs = [p for p in paragraphs if len(p) > 40]
-    summary = max(paragraphs, key=len) if paragraphs else full_text[:500]
+    raw_summary = max(paragraphs, key=len) if paragraphs else full_text[:500]
 
     remote = 1 if (location and "remote" in location.lower()) or (job_type and "remote" in job_type.lower()) else 0
     if not remote and re.search(r"\bremote\b", title, re.IGNORECASE):
         remote = 1
 
-    tags = infer_tags(title, summary, remote)
+    tags = infer_tags(title, raw_summary, remote)
+
+    summarized = summarize_listing(full_text, title)
+    summary = summarized or raw_summary
 
     listing = {
         "title": title,
         "company": company,
-        "summary": summary[:2000],
+        "summary": summary[:3000],
         "apply_url": url,
         "deadline": None,
         "location": location or "Nigeria",
@@ -153,6 +158,7 @@ def scrape_field(field_name, slug):
     inserted, failed = 0, 0
     urls = fetch_field_listing_urls(slug)
     logger.info(f"{field_name}: {len(urls)} listing URLs found")
+    touch_listings(list(urls))  # seen this run, even if the page fails to parse below
 
     for url in urls:
         try:

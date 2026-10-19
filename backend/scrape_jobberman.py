@@ -39,8 +39,12 @@ from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 
-from db import insert_listing, get_site_hash, set_site_hash
+from db import (
+    insert_listing, get_site_hash, set_site_hash,
+    touch_listings, begin_scrape, finish_scrape,
+)
 from tag_listings import infer_tags
+from listing_summarizer import summarize_listing
 
 logger = logging.getLogger("scrape_jobberman")
 
@@ -116,23 +120,32 @@ def parse_listing_page(url, html):
     experience_length = _extract_field(full_text, "Experience Length")
     working_hours = _extract_field(full_text, "Working Hours")
 
-    # Main description: take the longest paragraph block as a reasonable
-    # proxy since Jobberman doesn't mark up a single clean "description" div
-    # in what we could inspect — needs eyeballing on first real run.
+    # Fallback description: longest paragraph block, since Jobberman doesn't
+    # mark up a single clean "description" div in what we could inspect.
+    # This often grabs generic company boilerplate rather than the actual
+    # role details — used as a fallback and as input for tag inference, but
+    # replaced with a real summary below when Gemini's available.
     paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
     paragraphs = [p for p in paragraphs if len(p) > 40]
-    summary = max(paragraphs, key=len) if paragraphs else full_text[:500]
+    raw_summary = max(paragraphs, key=len) if paragraphs else full_text[:500]
 
     remote = 1 if location and "remote" in location.lower() else 0
     if not remote and re.search(r"\bremote\b", title, re.IGNORECASE):
         remote = 1
 
-    tags = infer_tags(title, summary, remote)
+    tags = infer_tags(title, raw_summary, remote)
+
+    # Try for a real essentials-only summary (pay, requirements, what you
+    # need to know before applying) instead of the raw paragraph grab.
+    # Falls back to the raw paragraph if Gemini isn't available — never
+    # blocks scraping on this.
+    summarized = summarize_listing(full_text, title)
+    summary = summarized or raw_summary
 
     listing = {
         "title": title,
         "company": company,
-        "summary": summary[:2000],
+        "summary": summary[:3000],
         "apply_url": url,
         "deadline": None,
         "location": location or "Nigeria",
@@ -156,6 +169,10 @@ def scrape_sitemap_category(category_name, sitemap_url, max_listings=None):
 
     urls = fetch_sitemap_listing_urls(sitemap_url)
     logger.info(f"{category_name}: {len(urls)} URLs in sitemap")
+
+    # Every URL in the sitemap is "seen" this run, even the ones we skip as
+    # unchanged below — otherwise unchanged listings would look like they vanished.
+    touch_listings([u for u, _lastmod in urls])
 
     if max_listings:
         urls = urls[:max_listings]
@@ -194,6 +211,7 @@ def scrape_internship_graduate_pages(max_pages=None):
     DB writes via insert_listing's own UPSERT-on-apply_url behavior.
     """
     inserted, failed = 0, 0
+    index_failed = 0  # category index pages we could not load (these hide listings from us)
     pages = INTERNSHIP_GRADUATE_PAGES[:max_pages] if max_pages else INTERNSHIP_GRADUATE_PAGES
 
     for page_url in pages:
@@ -209,12 +227,14 @@ def scrape_internship_graduate_pages(max_pages=None):
         except Exception as e:
             logger.error(f"Failed to load category page {page_url}: {e}")
             failed += 1
+            index_failed += 1
             continue
 
         if not listing_links:
             # ran out of results before hitting max_pages — stop early
             break
 
+        touch_listings(list(listing_links))
         for url in listing_links:
             try:
                 resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -229,7 +249,7 @@ def scrape_internship_graduate_pages(max_pages=None):
             time.sleep(REQUEST_DELAY_SECONDS)
 
     logger.info(f"Internship & Graduate: inserted/updated={inserted}, failed={failed}")
-    return inserted, failed
+    return inserted, failed, index_failed
 
 
 def run():
@@ -240,14 +260,22 @@ def run():
     """
     total_inserted = 0
     total_unchanged = 0
+    scrape = begin_scrape("jobberman")
 
+    # A sitemap fetch failure raises and aborts the run before finish_scrape,
+    # so nothing gets marked missing off a half-finished scrape.
     for category_name, sitemap_url in SITEMAP_URLS.items():
         inserted, unchanged, _failed = scrape_sitemap_category(category_name, sitemap_url)
         total_inserted += inserted
         total_unchanged += unchanged
 
-    grad_inserted, _grad_failed = scrape_internship_graduate_pages()
+    grad_inserted, _grad_failed, grad_index_failed = scrape_internship_graduate_pages()
     total_inserted += grad_inserted
+
+    # Jobberman is the one source whose index we cover in full (sitemaps + category
+    # pages), so it's the one we trust to say "this listing is gone".
+    summary = finish_scrape(scrape, complete=(grad_index_failed == 0))
+    logger.info(f"Jobberman lifecycle: {summary}")
 
     return total_inserted, total_unchanged
 

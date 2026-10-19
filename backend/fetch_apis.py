@@ -6,7 +6,7 @@ import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from dotenv import load_dotenv
-from db import insert_listing
+from db import insert_listing, expire_listings
 from tag_listings import infer_tags
 from scrape_jobberman import run as run_jobberman
 from scrape_myjobmag import run as run_myjobmag
@@ -505,6 +505,10 @@ def main():
     logger.info(f"TOTAL: inserted={total_inserted}, duplicates(refreshed)={total_duplicates}")
     if failures:
         logger.warning(f"Sources that failed this run: {', '.join(failures)}")
+    try:
+        logger.info(f"Expiry sweep: {expire_listings()} listings marked expired")
+    except Exception as e:
+        logger.error(f"Expiry sweep failed: {e}")
     logger.info("Fetch run complete.")
     logger.info("=" * 30 + "\n")
 

@@ -1,12 +1,15 @@
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+import onboarding as onboarding_rules
 from db import get_profile, update_profile, set_resume, clear_resume
 from deps import get_current_user
+from resume_parser import parse_resume
+from rate_limit import limiter
 
 router = APIRouter()
 
@@ -20,16 +23,27 @@ MAX_RESUME_BYTES = 5 * 1024 * 1024  # 5MB
 class ProfileUpdate(BaseModel):
     about: Optional[str] = None
     skills: Optional[List[str]] = None
+    onboarding: Optional[dict] = None
 
 
 @router.get("")
 def read_profile(current_user=Depends(get_current_user)):
-    return get_profile(current_user["id"])
+    profile = get_profile(current_user["id"])
+    profile.pop("resume_text", None)  # internal use only (resume tailoring) — never sent to the client
+    return profile
 
 
 @router.patch("")
 def edit_profile(body: ProfileUpdate, current_user=Depends(get_current_user)):
-    return update_profile(current_user["id"], about=body.about, skills=body.skills)
+    cleaned = None
+    if body.onboarding is not None:
+        try:
+            cleaned = onboarding_rules.clean(body.onboarding)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    profile = update_profile(current_user["id"], about=body.about, skills=body.skills, onboarding=cleaned)
+    profile.pop("resume_text", None)
+    return profile
 
 
 def _resume_stored_filename(user_id, ext):
@@ -46,7 +60,8 @@ def _existing_resume_path(profile):
 
 
 @router.post("/resume")
-async def upload_resume(file: UploadFile = File(...), current_user=Depends(get_current_user)):
+@limiter.limit("10/hour")
+async def upload_resume(request: Request, file: UploadFile = File(...), current_user=Depends(get_current_user)):
     original_name = file.filename or "resume"
     ext = Path(original_name).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -70,7 +85,22 @@ async def upload_resume(file: UploadFile = File(...), current_user=Depends(get_c
     dest = RESUME_DIR / stored_filename
     dest.write_bytes(contents)
 
-    return set_resume(current_user["id"], stored_filename, original_name)
+    # Best-effort parsing — never let a parsing hiccup break the upload
+    # itself, which has already succeeded by this point.
+    suggested_skills = []
+    resume_text = None
+    try:
+        parsed = parse_resume(contents, ext)
+        resume_text = parsed.get("text") or None
+        existing_profile_skills = set(get_profile(current_user["id"]).get("skills") or [])
+        suggested_skills = [s for s in parsed["skills"] if s not in existing_profile_skills]
+    except Exception:
+        pass
+
+    updated_profile = set_resume(current_user["id"], stored_filename, original_name, resume_text)
+    updated_profile.pop("resume_text", None)  # internal only — no reason to send the full text back to the client here
+
+    return {**updated_profile, "suggested_skills": suggested_skills}
 
 
 @router.get("/resume")

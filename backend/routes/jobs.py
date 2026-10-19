@@ -1,13 +1,20 @@
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
+
+import onboarding
+from deps import get_current_user
+from rate_limit import limiter
 
 from db import (
     get_job,
     get_jobs,
     count_jobs,
     get_sources,
-    get_locations
+    get_locations,
+    report_listing,
+    get_profile,
 )
 
 
@@ -36,7 +43,11 @@ def read_jobs(
 
     location:str="",
 
-    sort:str="newest"
+    sort:str="newest",
+
+    nysc:str="",
+
+    my_degree:str=""
 
 ):
 
@@ -70,7 +81,11 @@ def read_jobs(
 
         location=location,
 
-        sort=sort
+        sort=sort,
+
+        nysc=nysc,
+
+        my_degree=my_degree
 
     )
 
@@ -90,7 +105,11 @@ def read_jobs(
 
         skill=skill,
 
-        location=location
+        location=location,
+
+        nysc=nysc,
+
+        my_degree=my_degree
 
     )
 
@@ -109,6 +128,16 @@ def read_jobs(
 
 
 
+
+
+@router.get("/for-you")
+def jobs_for_you(limit: int = Query(10, ge=1, le=30), current_user=Depends(get_current_user)):
+    """Live listings ranked by the student's onboarding answers, each with plain-language reasons."""
+    profile = get_profile(current_user["id"]) or {}
+    prefs = profile.get("onboarding") or {}
+    if not prefs or prefs.get("skipped"):
+        return {"personalised": False, "jobs": []}
+    return {"personalised": True, "jobs": onboarding.rank_for_you(get_jobs, prefs, limit=limit)}
 
 
 @router.get("/sources")
@@ -141,3 +170,23 @@ def job(job_id:int):
 
 
     return result
+
+
+
+class ReportBody(BaseModel):
+    reason: Optional[str] = None
+
+
+@router.post("/{job_id}/report")
+@limiter.limit("20/hour")
+def report_job(request: Request, job_id: int, body: ReportBody, current_user=Depends(get_current_user)):
+    """User flags a listing (scam, fee requested, already closed...). One report
+    per user per listing; enough distinct reports hides it pending review."""
+    result = report_listing(current_user["id"], job_id, body.reason)
+    if not result["found"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "reported": True,
+        "already_reported": not result["new_report"],
+        "hidden": result["hidden"],
+    }
