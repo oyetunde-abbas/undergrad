@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS listings (
     deadline TEXT,
     location TEXT,
     remote INTEGER DEFAULT 0,
+    work_style TEXT,
+    type TEXT DEFAULT 'Internship',
+    category TEXT DEFAULT 'Technology',
+    skills TEXT,
+    experience_level TEXT DEFAULT 'Entry Level',
     nysc_free INTEGER DEFAULT 0,
     eligibility_notes TEXT,
     source TEXT,
@@ -58,6 +63,9 @@ CREATE TABLE IF NOT EXISTS site_hashes (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
+
+from migrate_add_expiry import migrate
+migrate(conn)
 
 conn.commit()
 conn.close()

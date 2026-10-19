@@ -1,10 +1,30 @@
 import re
 import requests
 import os
+import logging
+import traceback
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from dotenv import load_dotenv
-from db import insert_listing
+from db import insert_listing, expire_listings
+from tag_listings import infer_tags
+from scrape_jobberman import run as run_jobberman
+from scrape_myjobmag import run as run_myjobmag
+from scrape_hotnigerianjobs import run as run_hotnigerianjobs
 
 load_dotenv()
+
+LOG_PATH = Path(__file__).resolve().parent / "fetch_apis.log"
+
+logger = logging.getLogger("fetch_apis")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    file_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=3)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
 
 URL = "https://www.arbeitnow.com/api/job-board-api"
@@ -48,8 +68,24 @@ def clean_description(text):
     if not text:
         return ""
 
+    # Preserve structure before stripping tags: turn list items and paragraph/line
+    # breaks into real newlines so the result reads like a formatted job posting
+    # instead of one flattened run-on blob.
+    text = re.sub(r"<li[^>]*>", "\n• ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</li>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<(p|br|div|/p|/div)[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<(ul|ol|/ul|/ol)[^>]*>", "\n", text, flags=re.IGNORECASE)
+
+    # Strip any remaining tags
     text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"\s+", " ", text)
+
+    # Collapse repeated spaces/tabs WITHIN a line, but keep the newlines we just added
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]*", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Unescape common HTML entities that survive tag-stripping
+    text = text.replace("&amp;", "&").replace("&nbsp;", " ").replace("&#39;", "'").replace("&quot;", '"')
 
     return text.strip()
 
@@ -100,7 +136,7 @@ def fetch_arbeitnow():
 
             "title": title,
             "company": job.get("company_name"),
-            "summary": description[:500],
+            "summary": description[:3000],
             "apply_url": job.get("url"),
             "location": job.get("location"),
             "remote": 1 if "remote" in description.lower() else 0,
@@ -109,6 +145,7 @@ def fetch_arbeitnow():
             "source": "arbeitnow"
 
         }
+        listing.update(infer_tags(title, description, listing["remote"]))
 
 
         if insert_listing(listing):
@@ -175,7 +212,7 @@ def fetch_jobicy():
 
             "title": title,
             "company": job.get("companyName"),
-            "summary": description[:500],
+            "summary": description[:3000],
             "apply_url": job.get("url"),
             "location": job.get("jobGeo"),
             "remote": 1,
@@ -184,6 +221,7 @@ def fetch_jobicy():
             "source": "jobicy"
 
         }
+        listing.update(infer_tags(title, description, listing["remote"]))
 
 
         if insert_listing(listing):
@@ -255,7 +293,7 @@ def fetch_remoteok():
 
             "title": title,
             "company": job.get("company"),
-            "summary": description[:500],
+            "summary": description[:3000],
             "apply_url": job.get("apply_url"),
             "location": job.get("location"),
             "remote": 1,
@@ -264,6 +302,7 @@ def fetch_remoteok():
             "source": "remoteok"
 
         }
+        listing.update(infer_tags(title, description, listing["remote"]))
 
 
         if insert_listing(listing):
@@ -377,7 +416,7 @@ def fetch_adzuna():
             ),
 
 
-            "summary": description[:500],
+            "summary": description[:3000],
 
 
             "apply_url": job.get(
@@ -405,6 +444,7 @@ def fetch_adzuna():
             "source": "adzuna"
 
         }
+        listing.update(infer_tags(title, description, listing["remote"]))
 
 
 
@@ -430,72 +470,47 @@ def fetch_adzuna():
 
 def main():
 
-
     total_inserted = 0
     total_duplicates = 0
-
-
+    failures = []
 
     sources = [
-
         ("Arbeitnow", fetch_arbeitnow),
-
         ("Jobicy", fetch_jobicy),
-
         ("RemoteOK", fetch_remoteok),
-
-        ("Adzuna", fetch_adzuna)
-
+        ("Adzuna", fetch_adzuna),
+        ("Jobberman", run_jobberman),
+        ("MyJobMag", run_myjobmag),
+        ("HotNigerianJobs", run_hotnigerianjobs),
     ]
 
-
+    logger.info("=" * 30)
+    logger.info("Starting fetch run")
+    logger.info("=" * 30)
 
     for name, function in sources:
+        try:
+            inserted, duplicates = function()
+        except Exception as e:
+            failures.append(name)
+            logger.error(f"{name} FAILED: {e}")
+            logger.error(traceback.format_exc())
+            continue
 
-
-        inserted, duplicates = function()
-
-
-        print("\n" + name)
-
-        print(
-            f"  Inserted : {inserted}"
-        )
-
-        print(
-            f"  Duplicates : {duplicates}"
-        )
-
-
+        logger.info(f"{name}: inserted={inserted}, duplicates(refreshed)={duplicates}")
         total_inserted += inserted
-
         total_duplicates += duplicates
 
-
-
-
-    print(
-        "\n=============================="
-    )
-
-    print(
-        "TOTAL"
-    )
-
-    print(
-        "=============================="
-    )
-
-
-    print(
-        f"Inserted : {total_inserted}"
-    )
-
-    print(
-        f"Duplicates : {total_duplicates}"
-    )
-
-
+    logger.info("-" * 30)
+    logger.info(f"TOTAL: inserted={total_inserted}, duplicates(refreshed)={total_duplicates}")
+    if failures:
+        logger.warning(f"Sources that failed this run: {', '.join(failures)}")
+    try:
+        logger.info(f"Expiry sweep: {expire_listings()} listings marked expired")
+    except Exception as e:
+        logger.error(f"Expiry sweep failed: {e}")
+    logger.info("Fetch run complete.")
+    logger.info("=" * 30 + "\n")
 
 
 if __name__ == "__main__":
