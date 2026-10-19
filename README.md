@@ -58,9 +58,11 @@ undergrad/
 
 ## Run locally
 
-Open a terminal in the repository root.
+Run the backend and frontend in **two separate terminals**. Keep both terminals open while using the app. These commands are for Windows PowerShell; macOS/Linux equivalents are noted below.
 
-### 1. Set up the backend
+### Terminal 1 — backend API
+
+From the repository root:
 
 ```powershell
 cd backend
@@ -70,17 +72,17 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-On macOS/Linux, activate the environment with `source .venv/bin/activate` instead of the PowerShell activation command.
+If PowerShell blocks environment activation, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that terminal, then activate again. On macOS/Linux, use `source .venv/bin/activate`.
 
-Edit `backend/.env` and set a unique `JWT_SECRET_KEY`. Generate one with:
+Open `backend/.env` and set a unique `JWT_SECRET_KEY`. Generate one with:
 
 ```powershell
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Copy the generated value into `JWT_SECRET_KEY` in `backend/.env`. Do not commit `.env` or share its contents.
+Copy the generated value into `JWT_SECRET_KEY`. Keep `.env` private and do not commit it.
 
-For a fresh local database, initialise the schema from the backend directory:
+**Initialize a new local database** (this creates the schema, but does not restore the old job listings):
 
 ```powershell
 python init_db.py
@@ -90,19 +92,19 @@ python migrate_add_resume_columns.py
 python migrate_add_auth.py
 ```
 
-These migration scripts are included in the repository. If you are using an existing database, back it up before running migrations. Do not overwrite a database containing data you need.
+Run those commands from the `backend` directory. Do not run database initialization against a database containing data you need without first making a backup.
 
-Start the API from the `backend/` directory:
+Then start the backend, still in Terminal 1 and still inside `backend`:
 
 ```powershell
 uvicorn main:app --reload
 ```
 
-The API will normally be available at http://localhost:8000. FastAPI's interactive API documentation is at http://localhost:8000/docs.
+The API is normally at `http://localhost:8000`; its interactive docs are at `http://localhost:8000/docs`. Leave this terminal running.
 
-### 2. Set up the frontend
+### Terminal 2 — frontend
 
-In a second terminal, from the repository root:
+Open a **second** terminal, change to the repository root if necessary, and run:
 
 ```powershell
 cd frontend
@@ -110,9 +112,20 @@ npm install
 npm run dev
 ```
 
-Vite will print the local frontend URL, usually http://localhost:5173.
+Open the local URL Vite prints, usually `http://localhost:5173`. Leave this terminal running too. The frontend uses `http://localhost:8000` as its API by default; `VITE_API_URL` can override that.
 
-The frontend uses `VITE_API_URL` when set and otherwise defaults to `http://localhost:8000`. If you set a custom API URL, configure the backend's CORS origins to allow your frontend origin as well.
+### Populate the job listings
+
+The current Git commit does **not** include `data/listings.db` or a preloaded set of job listings. A newly initialized database starts empty. To try to fetch listings from the configured public APIs and scrapers, stop neither terminal; open a **third terminal**, then run:
+
+```powershell
+cd backend
+# Activate the backend virtual environment if this is a new terminal:
+.\.venv\Scripts\Activate.ps1
+python fetch_apis.py
+```
+
+The ingestion script needs internet access, and external APIs or scrapers may fail or change. Check its terminal output and `backend/fetch_apis.log`; successful ingestion should add listings to the local database. This does not recreate the old database or its exact contents.
 
 ### 3. Optional integrations
 
