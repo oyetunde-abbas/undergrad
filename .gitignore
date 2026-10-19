@@ -6,14 +6,17 @@ __pycache__/
 venv/
 .venv/
 
-# Environment variables
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
+backend/.env
 
 # IDE
 .vscode/
 .idea/
 
-# Python cache
+# Python cache and tests
 .pytest_cache/
 
 # OS files
@@ -22,3 +25,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local databases and user-uploaded resumes (may contain personal data)
+/data/listings.db*
+/data/resumes/
